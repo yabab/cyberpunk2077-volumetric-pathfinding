@@ -1,0 +1,23 @@
+# Third-party SDK, cloned on demand. CMake prints the exact clone command if it is missing.
+vendor/
+
+# CMake output
+build/
+
+# Built plugin, staged by the post-build step. Rebuildable, so not tracked.
+code/red4ext/plugins/PathfindingUpdate/*.dll
+code/red4ext/plugins/PathfindingUpdate/*.pdb
+
+# Bake artifacts - ignored by GIT, but the .vnavbake DOES ship with the release.
+#
+# These are two different questions and only the first one is settled by this file:
+#   - In git? No. The .vnavgeo is ~1.4 GB and the .vnavbake ~173 MB, both far past GitHub's
+#     100 MB per-file hard limit, and both are reproducible from the game archives
+#     (WolvenKit `navbake` then `vnav_bake` - see README.md).
+#   - In the shipped mod? Yes, the .vnavbake. It is staged under
+#     code/red4ext/plugins/PathfindingUpdate/ and the plugin is useless without it.
+#
+# So a fresh clone will NOT have a bake and must generate one before the mod does anything.
+bake/
+*.vnavgeo
+*.vnavbake

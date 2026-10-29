@@ -1,0 +1,172 @@
+CRASH INVESTIGATION 2026-10-28 (attribution OPEN — do not treat as settled)
+
+  Two crashes while testing today (ReportQueue 16:04:38 + 16:13:45, both
+  EXCEPTION_ACCESS_VIOLATION reading 0xD0). Both minidumps walked (utils/dmpwalk.py --disasm,
+  plus raw memory reads off the dump):
+
+  MECHANISM (settled): a virtual call through vtable slot 0xD0 on an object whose vtable
+    pointer is ZERO — the object memory is already FREED (dump 1: block fully zeroed; dump 2:
+    +0 zeroed like a freelist marker, rest repurposed). Up-stack is a nested deleting-
+    destructor cascade (MI engine object, vtables at +0/+0x160, members at +0x3a8 -> +0x10/+0
+    -> +0x98) releasing member handles through HandleSharedStorage::ReleaseWeak (named in
+    cyberpunk2077_addresses.json). I.e. use-after-free / double-release of a shared engine
+    handle during object-graph teardown. Main thread, mid-gameplay (telemetry: IsClosing=false,
+    LoadingStage=Finished, mounted, Badlands; uptime 471 s / 502 s). Both crashes identical:
+    same RIP (exe+0xb0c78a), same registers (rbp=-1, r9=0xff, r10=4), same container layout.
+
+  ATTRIBUTION (OPEN): CrashReporter.log shows THREE earlier crashes — 10/26 20:40 (game 2.31)
+    and 10/27 02:10 + 04:24 (game 2.5) — BEFORE this mod was ever installed (first plugin log
+    is 15:47 on 10/28). Their dumps were cleaned up, so those signatures cannot be compared.
+    The game crashes on this install WITHOUT this mod. Counter-evidence: both of today's
+    crashes are in mod+harness sessions; the plugin's native surface has no frames anywhere in
+    the stack scan and holds no engine handles (all native params scalar, probe runs through
+    RTTI on raw pointers). Candidates: (a) harness/CET entity-handle lifetime (M.avEntity held
+    across despawn; CET is v1.38.1 [HEAD], a dev build), (b) the plugin, (c) a 2.5-era base or
+    CET bug. Do NOT record a culprit before the one-variable retest.
+
+  FIXED WHILE HERE: harness col() used ToColor{}, which CET 1.38 (game 2.5) no longer provides.
+    Every Draw() with a live path threw a Lua error EVERY FRAME (~12k errors/min, two 5 MB log
+    rotations in one session) and the debug drawing never drew at all. Now probes
+    ToColor{} -> Color.new{...} -> Color.new(...) once and skips drawing quietly if none work.
+    The flood is gone as a variable for the retest.
+
+  RETEST PLAN (one variable at a time, same ~8 min play pattern — two crashes hit at 7m32s and
+  8m03s):
+    A. mod + harness (as deployed now, with the ToColor fix)
+    B. DLL + reds only — rename mods/VNavTest/init.lua aside
+    C. whole mod removed
+  If a crash occurs, run `python utils/dmpwalk.py --disasm`: same RIP exe+0xb0c78a = same bug.
+  KEEP the ReportQueue folder afterwards — the report cleaner deletes old ones, and those
+  dumps being gone is the only reason the 10/27 crashes can't be compared.
+
+STATUS 2026-10-28 — GAME PATCH 2.5 MIGRATION (2.31 -> 2.5, game patched 2026-10-27).
+
+  The mod was last built 2026-10-14 against a pre-2.5 RED4ext.SDK and would NOT have loaded
+  cleanly on 2.5: the patch changed the engine ABI the plugin is compiled against —
+  CBaseFunction 0xB0 -> 0xF0, CStackFrame 0x68 -> 0xA8, CGameEngine::framework 0x308 -> 0x348,
+  IRTTISystem gained 4 virtuals, SDK address hashes re-pointed, and
+  RED4EXT_V1_RUNTIME_VERSION_LATEST now targets 2.50 (RED4ext checks it at load).
+
+  DONE  re-pinned vendor/RED4ext.SDK to upstream 5246e65 ("Update types for patch 2.5 (#232)").
+        No source changes were needed - the SDK update was ABI-internal.
+  DONE  rebuilt all targets (VS 2026 / CMake 4.4.4; the old build/ was a stale cross-machine
+        CMake cache and was regenerated). 3017 offline checks green.
+  DONE  verified the probe ABI against the 2.5 decompile (codeberg PR #32, head 17c62d00):
+        TraceResult unchanged ({position, normal, material} - fits the 0x60 buffer),
+        OverlapByQueryFilter still 5 params in order, QueryFilter.AddGroup unchanged,
+        and Overlap's queryPreset overload lives on StateGameScriptInterface, so
+        GetFunction("Overlap") on the queries system stays unambiguous.
+  DONE  verified every game API the .reds use against 2.5 (GetTargetParts, TSQ_ALL,
+        TargetSearchQuery, TS_TargetPartInfo.GetComponent, IComponent.GetEntity,
+        Entity.GetEntityID/GetWorldPosition, IsPathIntersectingWithTraffic,
+        GetTargetingSystem/GetTrafficSystem/GetDelaySystem, DelayCallbackNextFrame) -
+        all present, signatures unchanged. scc headless compile gate passes on both files.
+        (COMPILE GATE ONLY - not verification; only a game launch verifies.)
+  DONE  verified the CET harness's Codeware surface against THIS install's compiled blob
+        (final.redscripts.modded): DynamicEntitySpec / GetDynamicEntitySystem / spawnInView /
+        alwaysSpawned / persistSpawn all present on Codeware 1.21.1 + game 2.5.
+  DONE  nightcity.vnavbake RE-EXTRACTED from the 2.5 archives (WolvenKit navbake) and
+        re-voxelised with --gamebuild 2.5, so V2's stamp check is live (was: unstamped).
+        VNavTest now attaches via VNavAttachBakeChecked with expected build "2.5" by default.
+  DONE  old-vs-new geometry question MEASURED with `vnav_bake --compare` (2.3 bake vs 2.5 bake,
+        1 m voxels): 508,112,069 solid voxels in both (100.0% of each), 4,012 only in 2.3,
+        59,001 only in 2.5. World geometry effectively unchanged between those patches - the
+        shipped bake is re-extracted anyway, so that is measured, not assumed.
+  DONE  vnav_bake usage text now documents --gamebuild (it existed but was undocumented).
+  FOUND the --gamebuild flag was parsed and then DROPPED - BakedNavWriter::SetGameBuild was
+        called from tests only, never from vnav_bake's main. A bake "re-baked with --gamebuild"
+        would have come out UNSTAMPED anyway while looking stamped. Fixed (wired + the summary
+        now echoes the stamp, and warns when there is none); --inspect confirms "game build: 2.5"
+        round-trips through the loader the game uses. Lesson: verify the artifact, not the flag.
+  NOTE  this deploy builds with -DVNAV_LOGGING=ON on purpose (test run). Rebuild with logging
+        OFF before shipping anything.
+
+STATUS 2026-08-16 — sessions 1 AND 2 fully implemented. 3017 offline checks green, deployed.
+
+Session 1 (see git history for detail):
+  DONE  Q3  per-waypoint clearance      (L3)  — PathResult::clearances / VNavPathClearance
+                                                ⚠ SATURATES at the volume's tight threshold
+  DONE  Q2  moderate: turn clearance    (L2)  — PathQuery::agentLength / VNavSetAgentLength
+  DONE  Q2  large: 4D (x,y,z,yaw)             — VNavSetYawSearch / VNavPathYaw
+  DONE  Q1  dynamic obstacle layer      (L5)  — VNavDynamicBegin/Add/Commit
+  DONE  Q3  optional fillet smoothing   (L6)  — Smoothing::Fillet (=3)
+
+Session 2:
+  DONE  L1  escape / unstick query      — NavService::FindEscape / VNavFindEscape
+                                          ⚠ minDistance is load-bearing; without it the answer is
+                                            "where you already are", which changes nothing
+  DONE  L4  resumeIndex shipped in API  — NavService::ResumeIndex / VNavPathResumeIndex
+  DONE  L7  hierarchical coarse graph   — PathQuery::coarseGuidance / VNavSetCoarseGuidance
+                                          measured 900,725 -> 249,745 expansions (3.6x) for 311
+                                          coarse expansions, same path length. Needs a bake, and
+                                          only helps where barriers are CHUNK-scale.
+  DONE  L8  resumable chunk sampling    — ChunkSampler; ServiceConfig::maxProbesPerChunkPerPump
+                                          verified byte-identical to the atomic path over 897
+                                          suspensions, exhaustion behaviour preserved
+  DONE  L9  direct native probe         — pre-bound arg list + CStack built in-process.
+                                          NOTE: the game's own native dispatcher CANNOT be
+                                          bypassed (ExecuteNative/GetHandler are private, no
+                                          native fn pointer exposed). Only our wrapper was removed.
+  DONE  H1  stranding detect + recover  — harness TickStranding, auto-escape
+  DONE  H2  gate hoverHeight            — steps down 1.0/0.5/0.25x until VNavIsFree
+  DONE  H3  tuning wired into the UI    — "Search tuning" section + guidance controls
+  DONE  H4  distance-based replan       — replanOnDistance, with the timer kept as a backstop
+  DONE  V1  LOD over-blocking           — MEASURED, does not reproduce. LOD0∩LOD1 = 8.3% of LOD0;
+                                          LOD2∩LOD1 = 20.0% of LOD2. The LODs are complementary,
+                                          not coarse stand-ins, so the union is correct. Tool:
+                                          `vnav_bake --compare a.vnavbake b.vnavbake`.
+  DONE  V2  game-version stamp          — BakeHeader::gameBuild, written into the header's SPARE
+                                          bytes so no version bump and existing bakes still load.
+                                          `vnav_bake --gamebuild <str>` / VNavAttachBakeChecked.
+                                          ⚠ THE SHIPPED nightcity.vnavbake IS UNSTAMPED — re-bake
+                                            with --gamebuild to get load-time checking.
+  DONE  S1  logging off for shipping    — now a build switch: -DVNAV_LOGGING=ON to debug.
+                                          Verified: log strings are absent from the shipping DLL.
+
+FOUND WHILE DOING THE ABOVE (not on either list):
+  DONE  probe budget over-blocked narrow space. maxProbesPerChunk was 2048; full refinement of a
+        16^3 chunk costs ~4681 probes (up to 8777 with the leaf hard-inflation probe), so anything
+        needing leaf detail everywhere resolved to SOLID. Measured: a 4 m corridor read as
+        completely filled in (every query Unreachable) at 2048 and is passable at 9216, which is
+        now the default. maxProbesPerQuery raised to 276480 to keep the documented ~30-chunk
+        reach. Pinned by TestProbeBudgetOverBlocking.
+
+DYNAMIC OBSTACLES — producer shipped 2026-08-16 (code/r6/scripts/PathfindingUpdate/DynamicObstacles.reds)
+
+  L5 shipped the dynamic obstacle LAYER but nothing fed it: 3 native declarations, 0 callers, so the
+  planner still routed straight through traffic. That producer now exists.
+
+  HARD CONSTRAINT, checked not assumed: the producer MUST work at entity level.
+    - TraceResult is { position, normal, material } — NO entity handle. A physics overlap can say
+      something is there but never what, and gives no extents to build an AABB from.
+    - And probe results feed the CACHED chunk grid, which is exactly what the separate layer exists
+      to avoid poisoning.
+    So "add Vehicle to the collision mask" is not a route to this, on two independent grounds.
+
+  TRAP: TrafficSystem.FindEntitiesNearPlane(... entityIDs: [wref<Entity>]) looks perfect and is
+  UNUSABLE from redscript — that output array is not marked `out`, and redscript arrays are value
+  types, so nothing comes back. Do not spend time on it again.
+
+  Two tiers, complementary:
+    Tier 1  VNavDynamic.Refresh(volume, instigator, radius)  — PREVENTIVE. TargetingSystem
+            .GetTargetParts (proper `out` array) -> dedupe by EntityID -> VNavDynamicAdd. Makes the
+            SEARCH route around obstacles. ~0.2 s cadence is ample; the search pins the snapshot.
+    Tier 2  VNavDynamic.PathHitsTraffic(gi, path, clearance, out hit) — REACTIVE. Vanilla's
+            TrafficSystem.IsPathIntersectingWithTraffic, which takes exactly the shape
+            VNav.GetPoints() returns. Nearly free; catches what moved since the last Refresh, but
+            can only reject a path, never route around.
+
+  Every API in that file was verified against cyberpunkDecompiledScripts before writing. Two were
+  wrong on first look and got corrected: GetWorldPosition/GetEntityID at orphans.swift:37455/37465
+  are IMappin's, not Entity's — the real ones are core/entity/entity.swift:44 and :8.
+
+  ⚠ UNTESTED. Redscript cannot be typechecked without launching the game. Also: GetTargetParts
+  enumerates what the TARGETING system considers a target, which covers live NPCs and traffic but
+  may miss empty parked cars — pair Tier 1 with Tier 2 rather than trusting the snapshot alone.
+
+STILL OPEN
+  - Nothing from either session's list.
+  - EVERYTHING IS UNTESTED IN-GAME. All 3017 checks are offline; the redscript and CET halves
+    cannot be typechecked without launching the game. Highest-risk items to exercise first:
+    4D yaw search, the escape/stranding recovery path, and the harness changes.
+  - DONE 2026-10-28: re-baked with --gamebuild 2.5 (and fixed the flag so it actually stamps).

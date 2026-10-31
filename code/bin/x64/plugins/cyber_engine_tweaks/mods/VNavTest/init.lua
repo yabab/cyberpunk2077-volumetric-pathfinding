@@ -240,49 +240,31 @@ end
 -- disabled note() builds nothing.
 local function note(msg)
     if M.debug then
-        print("[VNavTest] " .. msg)
+        -- print("[VNavTest] " .. msg) -- sink silenced for shipping; uncomment to debug
     end
 end
 
--- Color construction is version-sensitive across CET builds: older CET exposed a `ToColor{}`
--- table converter, CET 1.38 (game 2.5) does not, and the modern form is the RED type
--- constructor `Color.new{ Red = ..., Green = ..., Blue = ..., Alpha = ... }`. The working form
--- is probed once on first use.
---
--- Why this matters beyond cosmetics: when ToColor vanished, every Draw() with a live path threw
--- a Lua error here EVERY FRAME - ~12k errors/minute across two 5 MB log rotations - and the
--- debug lines (the radius rings this harness exists for) never drew at all. If no constructor
--- works, drawing is skipped quietly instead of throwing.
-local colorCtor = false -- false = unresolved, nil = none available, else a constructor
-local function makeColorCtor()
-    if ToColor ~= nil then
-        return function(r, g, b, a) return ToColor{ r = r, g = g, b = b, a = a } end
-    end
-    if Color == nil then
-        return nil
-    end
-    local ok = pcall(function() local _ = Color.new{ Red = 1, Green = 1, Blue = 1, Alpha = 255 } end)
-    if ok then
-        return function(r, g, b, a) return Color.new{ Red = r, Green = g, Blue = b, Alpha = a } end
-    end
-    ok = pcall(function() local _ = Color.new(1, 1, 1, 255) end)
-    if ok then
-        return function(r, g, b, a) return Color.new(r, g, b, a) end
-    end
-    return nil
-end
-
-local function col(r, g, b, a)
-    if colorCtor == false then
-        colorCtor = makeColorCtor()
-        if not colorCtor then
-            note("no usable Color constructor (ToColor / Color.new) - debug drawing disabled")
+-- Debug drawing is an OPTIONAL dependency on the Debug Draw mod
+-- (https://github.com/jackhumbert/cp2077_debug_draw). Debug Draw declares no redscript module,
+-- so `@if(ModuleExists(...))` cannot gate it and a redscript shim would break compilation without
+-- it; hence the calls are made from Lua, resolved once at runtime. Missing mod (or a failure) =
+-- drawing silently off, nothing else affected.
+local ddState = nil -- nil = unresolved, false = unavailable, else the DebugDraw class table
+local function debugDraw()
+    if ddState == nil then
+        local ok, dd = pcall(function()
+            local c = DebugDraw
+            if c ~= nil and c.Path ~= nil and c.Sphere ~= nil and c.Rgba ~= nil then
+                return c
+            end
+            return nil
+        end)
+        ddState = (ok and dd) or false
+        if not ddState then
+            note("Debug Draw mod not found - debug drawing disabled")
         end
     end
-    if not colorCtor then
-        return nil
-    end
-    return colorCtor(r, g, b, a or 255)
+    return ddState or nil
 end
 
 local function playerPos()
@@ -630,37 +612,35 @@ function M.Draw()
     local wantGoal = M.drawGoal and M.goal
     if not (wantLines or wantRings or wantGoal) then return end
 
-    local dbg = Game.GetDebugVisualizerSystem()
-    if not dbg then return end
+    local dd = debugDraw()
+    if not dd then return end
 
-    local life = 0.12
-
-    if wantLines then
-        local green = col(80, 255, 120)
-        if green then
-            for i = 1, #M.lastPoints - 1 do
-                dbg:DrawLine3D(M.lastPoints[i], M.lastPoints[i + 1], green, life)
-            end
+    -- Debug Draw shapes last one frame, so this runs every frame (see the update hook) and
+    -- stopping clears within 0.1 s. Only the REQUIRED parameters are passed: CET Lua cannot pass
+    -- a script function's `opt` parameters (seconds/overlay/channel/thickness stay at defaults).
+    -- Any error disables drawing for the session instead of throwing every frame.
+    local ok, err = pcall(function()
+        if wantLines then
+            dd.Path(M.lastPoints, dd.Rgba(80, 255, 120))
         end
-    end
 
-    if wantRings then
-        local cyan = col(80, 200, 255)
-        if cyan then
+        if wantRings then
+            local cyan = dd.Rgba(80, 200, 255)
             for i = 1, #M.lastPoints, math.max(1, M.drawEvery) do
-                dbg:DrawWireSphere(M.lastPoints[i], M.agentRadius, cyan, life)
+                dd.Sphere(M.lastPoints[i], M.agentRadius, cyan)
             end
         end
-    end
 
-    -- Goal marker has its own flag. Plan() keeps M.goal current for "goal follows player" too -
-    -- seeing this marker floating above you rather than at your feet IS the confirmation that
-    -- the hover-height fix is doing what it says.
-    if wantGoal then
-        local orange = col(255, 200, 60)
-        if orange then
-            dbg:DrawWireSphere(M.goal, 2.0, orange, life)
+        -- Goal marker has its own flag. Plan() keeps M.goal current for "goal follows player"
+        -- too - seeing this marker floating above you rather than at your feet IS the
+        -- confirmation that the hover-height fix is doing what it says.
+        if wantGoal then
+            dd.Sphere(M.goal, 2.0, dd.Rgba(255, 200, 60))
         end
+    end)
+    if not ok then
+        ddState = false
+        note("Debug Draw call failed, drawing disabled: " .. tostring(err))
     end
 end
 

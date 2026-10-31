@@ -287,6 +287,15 @@ Note the AV record name is a guess and differs between versions and installed mo
 has a **Find AV records** button that scans TweakDB for what your install actually has. Spawning
 needs Codeware for `DynamicEntitySystem`. Sections 1–4 need neither.
 
+**Debug Draw is an optional dependency.** The harness draws its path lines, radius rings and goal
+marker through the [Debug Draw](https://github.com/jackhumbert/cp2077_debug_draw) mod (RED4ext
+plugin + shader archive; vendored at `supporterMods/DebugDraw`). If it is not installed, drawing is
+simply disabled and nothing else is affected. It is called from the Lua harness, not redscript,
+because Debug Draw declares no redscript module (`@if(ModuleExists)` cannot gate it, and a redscript
+reference would fail to compile without it). Only required parameters are passed, so shapes use the
+defaults (hairlines, no channel). This replaces the old `Game.GetDebugVisualizerSystem()` calls,
+which drew nothing on game 2.5. Untested in-game as of this change.
+
 ---
 
 ## Using it from redscript
@@ -555,5 +564,6 @@ it will never be routed through geometry.
 
 Per the workspace checklist: every log site routes through the single `Log()` in
 `src/game/Log.hpp`. To silence a shipping build, set `kLoggingEnabled = false` — the guard is
-`if constexpr`, so both the call and the string formatting disappear. It is currently **on** for
-bring-up.
+`if constexpr`, so both the call and the string formatting disappear. Shipping builds use
+`-DVNAV_LOGGING=OFF` (the default); `-DVNAV_LOGGING=ON` is for bring-up only. The VNavTest harness's
+console `print` is commented out in `note()` for the same reason.
